@@ -267,6 +267,8 @@ pub struct App {
     pre_search_selected: Option<NodeIdx>,
     /// Show on-disk usage (`st_blocks`) vs. apparent size (`st_size`).
     pub disk_usage: bool,
+    /// Show the item count column (`c`, `--show-itemcount`): entries below each directory.
+    pub show_item_count: bool,
     pub scanning: bool,
     /// Read-only: deletion disabled (ncdu `-r`).
     pub read_only: bool,
@@ -317,6 +319,7 @@ impl App {
             searching: false,
             pre_search_selected: None,
             disk_usage,
+            show_item_count: false,
             scanning,
             read_only,
             quit: false,
@@ -1006,6 +1009,7 @@ impl App {
                 }
             }
             KeyAction::ToggleUsage => self.disk_usage = !self.disk_usage,
+            KeyAction::ToggleItemCount => self.show_item_count = !self.show_item_count,
             KeyAction::Help => self.modal = Modal::Help,
             KeyAction::Delete => self.request_delete(),
             KeyAction::Open => self.open_selected(),
@@ -1274,6 +1278,8 @@ pub enum KeyAction {
     Leave,
     ToggleSort,
     ToggleUsage,
+    /// Show or hide the item count column.
+    ToggleItemCount,
     Help,
     Delete,
     Open,
@@ -1607,6 +1613,21 @@ mod tests {
         assert_eq!(app.tree.nodes[app.selected.unwrap()].name, "banner");
         app.on_key(KeyAction::PageUp(99));
         assert_eq!(app.tree.nodes[app.selected.unwrap()].name, "Beta");
+    }
+
+    /// `c` toggles the item count column. It starts hidden, and toggling leaves the selection
+    /// alone.
+    #[test]
+    fn c_toggles_item_count_column() {
+        let mut app = app_with_entries();
+        assert!(!app.show_item_count, "hidden by default");
+        app.on_key(KeyAction::Down);
+        let sel = app.selected;
+        app.on_key(KeyAction::ToggleItemCount);
+        assert!(app.show_item_count);
+        assert_eq!(app.selected, sel);
+        app.on_key(KeyAction::ToggleItemCount);
+        assert!(!app.show_item_count);
     }
 
     /// The footer's throughput figure: bytes/sec while a scan runs, none otherwise.

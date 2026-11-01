@@ -57,6 +57,8 @@ OPTIONS:
         --newer-than DUR     exclude entries newer than DUR (surfaces stale data)
     -X, --exclude-from FILE  read exclude patterns from FILE (one per line)
     -r, --read-only          disable the delete feature
+        --show-itemcount     show the item count column at start (toggle with c)
+        --hide-itemcount     hide the item count column at start (default)
     -o, --output FILE        scan without UI and write ncdu-compatible JSON ('-' = stdout)
     -f, --file FILE          load a tree from ncdu JSON instead of scanning ('-' = stdin)
     -h, --help               show help
@@ -87,6 +89,7 @@ rcdu -f old.json -o new.json    # re-read and rewrite a dump (recomputes totals/
 | `/` | filter entries by name (type to filter live, Enter applies, Esc cancels) |
 | `f` | search the whole tree by name; `Enter` jumps to the selected match |
 | `a` | toggle apparent size ↔ on-disk usage |
+| `c` | toggle the item count column (entries below each directory) |
 | `d` | delete selected entry (asks to confirm) |
 | `t` | show the largest files under the current directory |
 | `r` | rescan the selected directory in place |
@@ -143,6 +146,21 @@ Sizes follow the active metric (`a` toggles disk usage vs. apparent before openi
 `j`/`k` move, `Enter` jumps to the selected file's parent directory with the file highlighted,
 `q` closes. The popup holds the top 100 files as of when you opened it.
 
+### Item counts
+
+Sizes show where the bytes are; the item count shows where the *files* are. Press `c` (or start
+with `--show-itemcount`, as in ncdu) to add a column with the number of entries below each
+directory, counted recursively: the number `find DIR -mindepth 1 | wc -l` prints. It finds the
+directories that are full of many small files, such as `node_modules`, caches or mail spools,
+which are slow to copy, back up or delete even when they are small.
+
+Like sizes, the counts are live: they grow while a scan or rescan runs and shrink when you
+delete. Hard-link duplicates (`H`) and excluded entries (`<`) are listed, so they count as
+items. An excluded directory is not read, so it counts as one entry and its own cell stays
+blank, like the cells of files, symlinks and special files. Counts below 100,000 are exact;
+larger ones are compact and rounded down (`123k`, `4.1M`). Imported dumps (`-f`) get the same
+counts, derived on load. The info popup (`i`) shows the count as `total items`.
+
 ### Rescanning in place
 
 Press `r` on a directory to rescan it from disk without restarting: the subtree's current
@@ -157,9 +175,9 @@ can slightly overcount until a full restart.
 ### Entry details
 
 Press `i` on the selected entry to see its path, type, total and own sizes, the number of
-entries for directories, and flags (hard links, exclusions, read errors) — plus, statted
-lazily from disk at open time, its permissions, numeric owner, modification time, inode, and
-link count. Nothing extra is stored per node, so the tree stays lean; if the path is gone
+entries for directories (direct, and recursive as `total items`), and flags (hard links,
+exclusions, read errors) — plus, statted lazily from disk at open time, its permissions,
+numeric owner, modification time, inode, and link count. Nothing extra is stored per node, so the tree stays lean; if the path is gone
 (deleted mid-session, or a dump whose paths no longer exist) the on-disk section is simply
 omitted.
 

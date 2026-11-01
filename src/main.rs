@@ -27,6 +27,8 @@ struct Args {
     disk_usage: bool,
     one_file_system: bool,
     read_only: bool,
+    /// `--show-itemcount` / `--hide-itemcount`: initial state of the item count column.
+    show_item_count: bool,
     excludes: Vec<String>,
     /// `--older-than DUR`: exclude entries not modified for this long (seconds).
     older_than: Option<u64>,
@@ -38,19 +40,21 @@ struct Args {
     import: Option<String>,
 }
 
-fn parse_args() -> Result<Args, String> {
+/// Parse the command line (without the program name).
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut path: Option<PathBuf> = None;
     let mut threads = scan::default_threads();
     let mut disk_usage = true;
     let mut one_file_system = false;
     let mut read_only = false;
+    let mut show_item_count = false;
     let mut excludes = Vec::new();
     let mut older_than = None;
     let mut newer_than = None;
     let mut export = None;
     let mut import = None;
 
-    let mut it = std::env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-h" | "--help" => {
@@ -71,6 +75,8 @@ fn parse_args() -> Result<Args, String> {
             "-a" | "--apparent-size" | "--apparent" => disk_usage = false,
             "-x" | "--one-file-system" => one_file_system = true,
             "-r" | "--read-only" => read_only = true,
+            "--show-itemcount" => show_item_count = true,
+            "--hide-itemcount" => show_item_count = false,
             "--exclude" => {
                 excludes.push(it.next().ok_or("--exclude needs a pattern")?);
             }
@@ -120,6 +126,7 @@ fn parse_args() -> Result<Args, String> {
         disk_usage,
         one_file_system,
         read_only,
+        show_item_count,
         excludes,
         older_than,
         newer_than,
@@ -169,6 +176,8 @@ OPTIONS:
         --newer-than DUR     exclude entries newer than DUR (surfaces stale data)
     -X, --exclude-from FILE  read exclude patterns from FILE (one per line)
     -r, --read-only          disable the delete feature
+        --show-itemcount     show the item count column at start (toggle with c)
+        --hide-itemcount     hide the item count column at start (default)
     -o, --output FILE        scan without UI and write ncdu-compatible JSON ('-' = stdout)
     -f, --file FILE          load a tree from ncdu JSON instead of scanning ('-' = stdin)
     -h, --help               show this help
@@ -188,7 +197,7 @@ KEYS:
     o               open          i               entry details
     e               export JSON   b               shell here
     x / !           next error    ?               help    q/Esc  quit
-    g/G, Home/End   top/bottom",
+    g/G, Home/End   top/bottom    c               item counts",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -202,7 +211,7 @@ fn main() {
         std::process::exit(code);
     }
 
-    let args = match parse_args() {
+    let args = match parse_args(argv) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("rcdu: {e}\nTry 'rcdu --help'.");
@@ -230,6 +239,7 @@ fn main() {
     if let Some(src) = &args.import {
         let tree = unwrap_or_die(load_import(src), src);
         let mut app = App::new(tree, args.disk_usage, args.read_only, false);
+        app.show_item_count = args.show_item_count;
         run_ui(&mut app);
         return;
     }
@@ -238,6 +248,7 @@ fn main() {
     let (tree, root, opts) = prepare_scan(&args);
     let scan = scan::start(root, opts.clone());
     let mut app = App::new(tree, args.disk_usage, args.read_only, true);
+    app.show_item_count = args.show_item_count;
     app.attach_scan(scan, opts);
 
     let mut terminal = ratatui::init();
@@ -507,6 +518,8 @@ fn decode_key(
         KeyCode::Char('h') | KeyCode::Backspace | KeyCode::Left => KeyAction::Leave,
         KeyCode::Char('s') => KeyAction::ToggleSort,
         KeyCode::Char('a') => KeyAction::ToggleUsage,
+        // Plain `c` only: Ctrl-C was turned into Quit at the top.
+        KeyCode::Char('c') => KeyAction::ToggleItemCount,
         KeyCode::Char('d') => KeyAction::Delete,
         KeyCode::Char('o') => KeyAction::Open,
         KeyCode::Char('t') => KeyAction::TopFiles,
@@ -526,11 +539,11 @@ fn decode_key(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-    use super::{decode_key, parse_duration, plain_path};
+    use super::{decode_key, parse_args, parse_duration, plain_path, Args};
     use crate::app::{InputMode, KeyAction};
 
     #[test]
@@ -593,6 +606,48 @@ mod tests {
                 10
             ),
             Some(KeyAction::Quit)
+        ));
+    }
+
+    fn parse(args: &[&str]) -> Args {
+        parse_args(args.iter().map(|a| a.to_string())).unwrap()
+    }
+
+    /// `--show-itemcount` / `--hide-itemcount` set the column's initial state (hidden by
+    /// default); the last one given wins.
+    #[test]
+    fn itemcount_flags_set_the_initial_state() {
+        assert!(!parse(&[]).show_item_count, "hidden by default");
+        assert!(parse(&["--show-itemcount"]).show_item_count);
+        assert!(!parse(&["--hide-itemcount"]).show_item_count);
+        assert!(!parse(&["--show-itemcount", "--hide-itemcount"]).show_item_count);
+        assert!(parse(&["--hide-itemcount", "--show-itemcount"]).show_item_count);
+        let a = parse(&["/tmp", "--show-itemcount", "-rx"]);
+        assert!(a.show_item_count && a.read_only && a.one_file_system);
+        assert_eq!(a.path, PathBuf::from("/tmp"));
+    }
+
+    /// Plain `c` toggles the item count column; Ctrl-C still quits, and while a filter is
+    /// typed `c` goes to the query.
+    #[test]
+    fn decode_key_maps_c_to_item_count_toggle() {
+        let none = KeyModifiers::NONE;
+        assert!(matches!(
+            decode_key(KeyCode::Char('c'), none, InputMode::Normal, 10),
+            Some(KeyAction::ToggleItemCount)
+        ));
+        assert!(matches!(
+            decode_key(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                InputMode::Normal,
+                10
+            ),
+            Some(KeyAction::Quit)
+        ));
+        assert!(matches!(
+            decode_key(KeyCode::Char('c'), none, InputMode::Filter, 10),
+            Some(KeyAction::FilterChar('c'))
         ));
     }
 
