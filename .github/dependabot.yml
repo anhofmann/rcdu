@@ -1,0 +1,8 @@
+# Keep the commit-SHA pins in .github/workflows current (the version tag rides along as a
+# comment). Cargo dependencies are deliberately left out: Cargo.lock only changes on release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

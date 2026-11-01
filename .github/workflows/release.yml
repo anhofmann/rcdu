@@ -24,10 +24,11 @@ jobs:
           - { os: macos-latest,  target: aarch64-apple-darwin,       artifact: rcdu-portable-macos-aarch64 }
           - { os: macos-latest,  target: x86_64-apple-darwin,        artifact: rcdu-portable-macos-x86_64 }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Build portable binary
@@ -55,7 +56,7 @@ jobs:
             "dist/${{ matrix.artifact }}" --version || echo "cannot execute on this runner (cross-compiled) — skipping"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
@@ -65,7 +66,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           merge-multiple: true
           path: dist
