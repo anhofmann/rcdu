@@ -38,7 +38,7 @@ pub struct TopFiles {
 const TOP_FILES_LIMIT: usize = 100;
 
 /// How long the whole-tree search waits after the last keystroke before it runs.
-pub const FIND_DEBOUNCE: Duration = Duration::from_millis(300);
+pub const FIND_DEBOUNCE: Duration = Duration::from_millis(100);
 /// The most hits the whole-tree search keeps. Broad queries (`e`) can match half the tree;
 /// past the cap, matches are only counted, and the popup asks for a narrower query.
 pub const FIND_CAP: usize = 10_000;
@@ -1941,7 +1941,7 @@ mod tests {
     /// The pass runs only once the query has been left alone for the debounce interval, and
     /// every keystroke restarts the wait.
     #[test]
-    fn find_debounces_300ms() {
+    fn find_debounces_100ms() {
         let mut app = app_for_find();
         let t0 = Instant::now();
         let ms = Duration::from_millis;
@@ -1949,18 +1949,18 @@ mod tests {
         app.on_key(KeyAction::FindChar('r'));
         app.find_tick(t0, usize::MAX);
         assert_eq!(app.find_due(), Some(t0 + FIND_DEBOUNCE));
-        app.find_tick(t0 + ms(299), usize::MAX);
+        app.find_tick(t0 + ms(99), usize::MAX);
         assert!(find_state(&app).active.is_none(), "too early");
 
-        // Another key at 299 ms pushes the deadline out again.
+        // Another key at 99 ms pushes the deadline out again.
         app.on_key(KeyAction::FindChar('e'));
-        app.find_tick(t0 + ms(299), usize::MAX);
-        app.find_tick(t0 + ms(300), usize::MAX);
+        app.find_tick(t0 + ms(99), usize::MAX);
+        app.find_tick(t0 + ms(100), usize::MAX);
         assert!(
             find_state(&app).active.is_none(),
             "re-armed by the second key"
         );
-        app.find_tick(t0 + ms(599), usize::MAX);
+        app.find_tick(t0 + ms(199), usize::MAX);
         assert_eq!(find_state(&app).active.as_deref(), Some("re"));
         assert_eq!(app.find_due(), None);
         assert_eq!(find_state(&app).total, 3);
@@ -1968,8 +1968,8 @@ mod tests {
         // Erasing the query clears the results once the debounce fires.
         app.on_key(KeyAction::FindBackspace);
         app.on_key(KeyAction::FindBackspace);
-        app.find_tick(t0 + ms(600), usize::MAX);
-        app.find_tick(t0 + ms(900), usize::MAX);
+        app.find_tick(t0 + ms(200), usize::MAX);
+        app.find_tick(t0 + ms(300), usize::MAX);
         assert!(find_state(&app).active.is_none());
         assert!(hit_names(&app).is_empty());
     }

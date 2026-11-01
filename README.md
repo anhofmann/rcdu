@@ -123,7 +123,7 @@ directory you're viewing until cleared.
 
 `/` only narrows the directory you're viewing. Press `f` to ask the other question: *where in
 this tree is anything called X?* Type part of a name (case-insensitive, the same matching as
-`/`); 300 ms after your last keystroke every entry in the tree is searched, and the matches are
+`/`); 100 ms after your last keystroke every entry in the tree is searched, and the matches are
 listed with their path relative to the scan root and their size, largest first, with the
 matched part highlighted. `↑`/`↓` and `PgUp`/`PgDn` move (letters all go to the query),
 `Enter` jumps to the directory containing the selected match with it highlighted, and `Esc`
