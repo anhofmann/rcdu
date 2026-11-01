@@ -1,14 +1,14 @@
 #!/bin/sh
 # rcdu installer — downloads a portable binary from GitHub Releases.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mayankasthana/rcdu/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/anhofmann/rcdu/main/install.sh | sh
 #
 # Environment overrides:
 #   RCDU_VERSION=v0.1.0    install a specific release instead of the latest
 #   RCDU_INSTALL_DIR=...   install location (default: ~/.local/bin)
 set -eu
 
-REPO="mayankasthana/rcdu"
+REPO="anhofmann/rcdu"
 
 log()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -21,7 +21,7 @@ ARCH=$(uname -m)
 case "$OS" in
   Darwin) os=macos ;;
   Linux)  os=linux ;;
-  *) die "unsupported OS '$OS' — prebuilt binaries cover macOS and Linux (build from source with: cargo install rcdu)" ;;
+  *) die "unsupported OS '$OS' — prebuilt binaries cover macOS and Linux (build from source with: cargo install --git https://github.com/$REPO)" ;;
 esac
 case "$ARCH" in
   x86_64 | amd64)  arch=x86_64 ;;

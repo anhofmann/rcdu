@@ -27,14 +27,14 @@ ncdu JSON export format, so existing dumps and scripts keep working.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mayankasthana/rcdu/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/anhofmann/rcdu/main/install.sh | sh
 ```
 
 The script detects your platform (macOS Apple Silicon/Intel, Linux x86-64/ARM64), downloads the
-static binary from [Releases](https://github.com/mayankasthana/rcdu/releases), verifies its
+static binary from [Releases](https://github.com/anhofmann/rcdu/releases), verifies its
 SHA-256 checksum, and installs it to `~/.local/bin`. Override the destination with
 `RCDU_INSTALL_DIR=...` or pin a version with `RCDU_VERSION=v0.1.0`. From source with a Rust
-toolchain instead: `cargo install --git https://github.com/mayankasthana/rcdu`.
+toolchain instead: `cargo install --git https://github.com/anhofmann/rcdu`.
 
 Already installed? `rcdu update` upgrades in place: it checks GitHub Releases, verifies the
 SHA-256 checksum, and atomically replaces the binary (downloads run through `curl`, the same
@@ -248,7 +248,7 @@ Build all three with the bundled script:
 
 Prebuilt binaries for every release (Linux x86_64/ARM64 static musl, macOS
 Apple Silicon/Intel, plus SHA-256 checksums) are attached to the
-[GitHub Releases](https://github.com/mayankasthana/rcdu/releases) page.
+[GitHub Releases](https://github.com/anhofmann/rcdu/releases) page.
 
 The Linux targets are cross-compiled straight from macOS using the toolchain's bundled
 `rust-lld` — **no Docker, no zig, no external linker required**.
