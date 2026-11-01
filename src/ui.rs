@@ -1,5 +1,5 @@
 //! Rendering. ncdu-style: a sorted list of the current directory's children, each with a size
-//! bar, percentage of the parent, and a type indicator. Modal overlays (help, delete confirm)
+//! bar, percentage of the parent, an optional item count, and a type indicator. Modal overlays (help, delete confirm)
 //! are drawn on top.
 
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 
 use crate::app::{find_ci, indicator, App, Find, Modal, SortKey, TopFiles, FIND_CAP};
-use crate::model::{Excluded, NodeKind};
+use crate::model::{Excluded, Node, NodeKind};
 
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 
@@ -26,6 +26,32 @@ pub fn fmt_size(bytes: u64) -> String {
         format!("{:>6} {}", bytes, UNITS[u])
     } else {
         format!("{:>6.1} {}", v, UNITS[u])
+    }
+}
+
+/// Width of the item count column.
+const ITEMS_WIDTH: usize = 5;
+
+/// An item count in at most `ITEMS_WIDTH` columns: exact below 100,000, then compact (`123k`,
+/// `4.1M`, `12.3M`, `123M`, `4.2G`). Compact forms round down, so a count never reads larger
+/// than it is and `999,999` can't round up to a too-wide `1000k`.
+fn fmt_items(n: u32) -> String {
+    match n {
+        0..=99_999 => n.to_string(),
+        100_000..=999_999 => format!("{}k", n / 1_000),
+        1_000_000..=99_999_999 => format!("{}.{}M", n / 1_000_000, n / 100_000 % 10),
+        100_000_000..=999_999_999 => format!("{}M", n / 1_000_000),
+        _ => format!("{}.{}G", n / 1_000_000_000, n / 100_000_000 % 10),
+    }
+}
+
+/// The item count column's cell: the number of entries below a directory, blank for anything
+/// else. An excluded directory is blank too: it was never read, so its count says nothing.
+fn item_cell(n: &Node) -> String {
+    if n.is_dir() && n.excluded == Excluded::No {
+        fmt_items(n.items)
+    } else {
+        String::new()
     }
 }
 
@@ -394,7 +420,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
             (name_style, suffix)
         };
 
-        let line = Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 format!("{:>10} ", fmt_size(size)),
                 Style::default().fg(Color::Green),
@@ -404,9 +430,12 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::raw(format!("{pct:>5.1}% ")),
-            Span::styled(format!("{ind}{}{suffix}", n.name), name_style),
-        ]);
-        items.push(ListItem::new(line));
+        ];
+        if app.show_item_count {
+            spans.push(Span::raw(format!("{:>ITEMS_WIDTH$} ", item_cell(n))));
+        }
+        spans.push(Span::styled(format!("{ind}{}{suffix}", n.name), name_style));
+        items.push(ListItem::new(Line::from(spans)));
     }
 
     let mut state = ListState::default();
@@ -582,6 +611,7 @@ fn render_help(f: &mut Frame) {
         Line::from("  /                 filter entries by name (Enter applies, Esc cancels)"),
         Line::from("  f                 search the whole tree by name (Enter goes there)"),
         Line::from("  a                 toggle apparent ↔ disk usage"),
+        Line::from("  c                 toggle item count column (entries below each dir)"),
         Line::from("  d                 delete selected (confirm; needs full scan)"),
         Line::from("  o                 open selected in default app / file manager"),
         Line::from("  t                 largest files under this directory"),
@@ -662,7 +692,65 @@ fn render_confirm(f: &mut Frame, app: &App, idx: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_count, truncate_left};
+    use super::{fmt_count, fmt_items, item_cell, truncate_left, ITEMS_WIDTH};
+    use crate::model::{Excluded, NodeKind, Tree};
+
+    /// Exact while it fits, compact (rounded down) beyond, never wider than the column.
+    #[test]
+    fn fmt_items_fits_the_column() {
+        assert_eq!(fmt_items(0), "0");
+        assert_eq!(fmt_items(347), "347");
+        assert_eq!(fmt_items(12_345), "12345");
+        assert_eq!(fmt_items(99_999), "99999");
+        assert_eq!(fmt_items(100_000), "100k");
+        assert_eq!(fmt_items(999_999), "999k");
+        assert_eq!(fmt_items(1_000_000), "1.0M");
+        assert_eq!(fmt_items(4_190_000), "4.1M");
+        assert_eq!(fmt_items(12_399_999), "12.3M");
+        assert_eq!(fmt_items(99_999_999), "99.9M");
+        assert_eq!(fmt_items(100_000_000), "100M");
+        assert_eq!(fmt_items(999_999_999), "999M");
+        assert_eq!(fmt_items(1_000_000_000), "1.0G");
+        assert_eq!(fmt_items(u32::MAX), "4.2G");
+        for n in (0..32).map(|s| 1u32 << s).chain([u32::MAX]) {
+            for m in [n, n.saturating_sub(1), n / 10 * 9] {
+                assert!(fmt_items(m).len() <= ITEMS_WIDTH, "{m} → {}", fmt_items(m));
+            }
+        }
+    }
+
+    /// Directories show their count (even 0); files, symlinks, special files and excluded
+    /// directories stay blank.
+    #[test]
+    fn item_cell_is_blank_except_for_read_dirs() {
+        let mut t = Tree::new_imported("/r".into(), 0, 0, 1, 1);
+        let mut add = |parent, name: &str, kind, excluded| {
+            t.import_child(
+                parent,
+                name.into(),
+                kind,
+                1,
+                1,
+                1,
+                1,
+                false,
+                false,
+                excluded,
+                false,
+            )
+        };
+        let d = add(0, "d", NodeKind::Dir, Excluded::No);
+        let empty = add(0, "empty", NodeKind::Dir, Excluded::No);
+        let ex = add(0, "ex", NodeKind::Dir, Excluded::Pattern);
+        let f = add(d, "f", NodeKind::File, Excluded::No);
+        let l = add(d, "l", NodeKind::Link, Excluded::No);
+        let o = add(d, "o", NodeKind::Other, Excluded::No);
+        assert_eq!(item_cell(&t.nodes[d]), "3");
+        assert_eq!(item_cell(&t.nodes[empty]), "0");
+        for idx in [ex, f, l, o] {
+            assert_eq!(item_cell(&t.nodes[idx]), "", "{}", t.nodes[idx].name);
+        }
+    }
 
     #[test]
     fn fmt_count_groups_thousands() {

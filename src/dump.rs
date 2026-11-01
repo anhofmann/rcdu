@@ -272,5 +272,29 @@ mod tests {
         assert_eq!(t2.total_files, t.total_files);
         assert_eq!(t2.total_dirs, t.total_dirs);
         assert_eq!(t2.nodes[t2.root].name, "/root");
+        assert_eq!(t2.nodes[t2.root].items, 3, "sub, sub/a, b");
+    }
+
+    /// The format stores no item counts; they are derived on import, counting hard-link
+    /// duplicates and excluded entries like a live scan does.
+    #[test]
+    fn import_derives_item_counts() {
+        let json = r#"[1,2,{"progname":"ncdu"},
+            [{"name":"/r"},
+                [{"name":"d"},
+                    {"name":"f1","asize":10,"ino":7,"hlnkc":true},
+                    {"name":"f2","asize":10,"ino":7,"hlnkc":true},
+                    [{"name":"e"}]
+                ],
+                [{"name":"node_modules","excluded":"pattern"}],
+                {"name":"g","asize":5}
+            ]]"#;
+        let t = import(json.as_bytes()).unwrap();
+        let find = |name: &str| t.nodes.iter().position(|n| n.name == name).unwrap();
+        assert!(t.nodes[find("f2")].shared, "second link is a duplicate");
+        assert_eq!(t.nodes[find("d")].items, 3, "f1, f2, e");
+        assert_eq!(t.nodes[find("e")].items, 0);
+        assert_eq!(t.nodes[find("node_modules")].items, 0);
+        assert_eq!(t.nodes[t.root].items, 6, "d (+3), node_modules, g");
     }
 }

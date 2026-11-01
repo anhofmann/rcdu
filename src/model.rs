@@ -9,6 +9,9 @@
 //! size for display but contribute zero to the aggregated totals, so a tree's grand total
 //! dedupes hard links and ignores excluded subtrees, matching ncdu.
 //!
+//! Every entry, counted or not, is an *item*: each node also carries the number of entries in
+//! its subtree, maintained alongside the sizes so item counts are live and cost no walk.
+//!
 //! Memory: there is one [`Node`] per filesystem entry, so the struct is kept lean. Names use
 //! `CompactString` (inlined when ≤24 bytes, the common case, so most entries allocate nothing).
 //! A node's *own* size is derived from its children rather than stored, and the scan-only
@@ -66,6 +69,9 @@ pub struct Node {
     /// Number of directories in this subtree (including self) not yet `readdir`-ed.
     /// A subtree is fully scanned — and only then safe to delete — when this hits 0.
     pub unscanned: u32,
+    /// Number of entries in this subtree, not counting the node itself (ncdu's item count).
+    /// Every entry counts, including hard-link duplicates and excluded entries. Saturating.
+    pub items: u32,
 }
 
 impl Node {
@@ -113,6 +119,7 @@ impl Tree {
             scanned: false,
             // The root itself is an unscanned directory until its batch arrives.
             unscanned: 1,
+            items: 0,
         };
         let mut dir_index = HashMap::new();
         dir_index.insert(0, 0);
@@ -156,6 +163,8 @@ impl Tree {
 
         let mut sum_apparent = 0u64;
         let mut sum_disk = 0u64;
+        // Every entry is an item, whether or not its size counts.
+        let new_items = u32::try_from(batch.nodes.len()).unwrap_or(u32::MAX);
         let mut new_dir_ids = Vec::new();
         let mut new_subdirs = Vec::new();
 
@@ -195,6 +204,7 @@ impl Tree {
                 read_error: nn.read_error,
                 scanned: false,
                 unscanned: 0,
+                items: 0,
             });
             self.nodes[parent_idx].children.push(idx);
 
@@ -211,8 +221,9 @@ impl Tree {
             self.bump_unscanned(idx, 1);
         }
 
-        // Push the children's combined counted size up through every ancestor.
-        self.add_size(parent_idx, sum_apparent, sum_disk);
+        // Push the children's combined counted size and their item count up through every
+        // ancestor.
+        self.add_totals(parent_idx, sum_apparent, sum_disk, new_items);
 
         // Flush any batches that were waiting on directories we just created.
         for id in new_dir_ids {
@@ -225,21 +236,27 @@ impl Tree {
         }
     }
 
-    fn add_size(&mut self, start: NodeIdx, apparent: u64, disk: u64) {
+    /// Add counted sizes and an item count to `start` and every ancestor, in one walk.
+    fn add_totals(&mut self, start: NodeIdx, apparent: u64, disk: u64, items: u32) {
         let mut cur = Some(start);
         while let Some(i) = cur {
-            self.nodes[i].apparent += apparent;
-            self.nodes[i].disk += disk;
-            cur = self.nodes[i].parent;
+            let n = &mut self.nodes[i];
+            n.apparent += apparent;
+            n.disk += disk;
+            n.items = n.items.saturating_add(items);
+            cur = n.parent;
         }
     }
 
-    fn sub_size(&mut self, start: NodeIdx, apparent: u64, disk: u64) {
+    /// The inverse of [`Tree::add_totals`], saturating at zero.
+    fn sub_totals(&mut self, start: NodeIdx, apparent: u64, disk: u64, items: u32) {
         let mut cur = Some(start);
         while let Some(i) = cur {
-            self.nodes[i].apparent = self.nodes[i].apparent.saturating_sub(apparent);
-            self.nodes[i].disk = self.nodes[i].disk.saturating_sub(disk);
-            cur = self.nodes[i].parent;
+            let n = &mut self.nodes[i];
+            n.apparent = n.apparent.saturating_sub(apparent);
+            n.disk = n.disk.saturating_sub(disk);
+            n.items = n.items.saturating_sub(items);
+            cur = n.parent;
         }
     }
 
@@ -285,13 +302,18 @@ impl Tree {
     /// Remove a fully-scanned subtree from the tree (after it has been removed from disk).
     /// Returns the number of (dirs, files) removed.
     pub fn delete_subtree(&mut self, idx: NodeIdx) -> (u64, u64) {
-        // Detach from parent and subtract its counted size from all ancestors.
+        // Detach from parent and subtract its counted size and its items (the node itself plus
+        // everything below it) from all ancestors.
         if let Some(parent) = self.nodes[idx].parent {
             self.nodes[parent].children.retain(|&c| c != idx);
-            if self.nodes[idx].counts() {
-                let (ap, dk) = (self.nodes[idx].apparent, self.nodes[idx].disk);
-                self.sub_size(parent, ap, dk);
-            }
+            let n = &self.nodes[idx];
+            let (ap, dk) = if n.counts() {
+                (n.apparent, n.disk)
+            } else {
+                (0, 0)
+            };
+            let items = n.items.saturating_add(1);
+            self.sub_totals(parent, ap, dk, items);
         }
         // Cut the upward link too, so `is_attached` can tell the tombstones apart.
         self.nodes[idx].parent = None;
@@ -314,10 +336,10 @@ impl Tree {
     }
 
     /// Prepare a subtree for an in-place rescan (`r`): its children are detached (and dropped
-    /// from the global dir/file counts), its aggregates are reset to its own size — so every
-    /// ancestor's total stays correct while the rescan streams back in — and the subtree is
-    /// marked unscanned again. `id_base` registers the node as the root of a new scan
-    /// generation (see `scan::start_at`); batches from that scan graft back into this node.
+    /// from the global dir/file counts), its aggregates are reset to its own size and zero
+    /// items — so every ancestor's total stays correct while the rescan streams back in — and
+    /// the subtree is marked unscanned again. `id_base` registers the node as the root of a new
+    /// scan generation (see `scan::start_at`); batches from that scan graft back into this node.
     pub fn begin_refresh(&mut self, idx: NodeIdx, id_base: u64) {
         debug_assert!(self.nodes[idx].is_dir());
         // Own size first: the aggregate minus the counted children is this node's own size,
@@ -349,16 +371,18 @@ impl Tree {
         let n = &mut self.nodes[idx];
         let removed_apparent = n.apparent.saturating_sub(own_apparent);
         let removed_disk = n.disk.saturating_sub(own_disk);
+        let removed_items = n.items;
         let parent = n.parent;
         n.apparent = own_apparent;
         n.disk = own_disk;
+        n.items = 0;
         n.scanned = false;
         n.read_error = false;
         n.unscanned = 1;
-        // The detached children's counted sizes are baked into every ancestor's aggregate —
-        // remove them, so totals stay correct while the rescan streams the subtree back in.
+        // The detached children's counted sizes and items are baked into every ancestor's
+        // aggregate — remove them, so totals stay correct while the rescan streams them back in.
         if let Some(parent) = parent {
-            self.sub_size(parent, removed_apparent, removed_disk);
+            self.sub_totals(parent, removed_apparent, removed_disk, removed_items);
         }
         self.dir_index.insert(id_base, idx);
     }
@@ -419,7 +443,8 @@ impl Tree {
         t
     }
 
-    /// Append an imported child under `parent`, propagating its counted size. Returns its index.
+    /// Append an imported child under `parent`, propagating its counted size and its item.
+    /// Returns its index.
     #[allow(clippy::too_many_arguments)]
     pub fn import_child(
         &mut self,
@@ -456,11 +481,16 @@ impl Tree {
             read_error,
             scanned: true,
             unscanned: 0,
+            items: 0,
         });
         self.nodes[parent].children.push(idx);
-        if !shared && excluded == Excluded::No {
-            self.add_size(parent, apparent, disk);
-        }
+        // Every entry is an item; only counted entries add to the sizes.
+        let (apparent, disk) = if !shared && excluded == Excluded::No {
+            (apparent, disk)
+        } else {
+            (0, 0)
+        };
+        self.add_totals(parent, apparent, disk, 1);
         idx
     }
 
@@ -591,5 +621,214 @@ mod tests {
         for gone in ["x", "sub", "y"] {
             assert!(!t.is_attached(idx_of(&t, gone)), "{gone} is a tombstone");
         }
+    }
+
+    fn items(t: &Tree, name: &str) -> u32 {
+        t.nodes[idx_of(t, name)].items
+    }
+
+    /// Ground truth for `items`: walk the attached subtree and count every entry below `idx`.
+    fn entries_below(t: &Tree, idx: NodeIdx) -> u32 {
+        t.nodes[idx]
+            .children
+            .iter()
+            .map(|&c| 1 + entries_below(t, c))
+            .sum()
+    }
+
+    /// The item count must not cost memory: `items` fits in existing padding.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn node_stays_lean() {
+        assert_eq!(std::mem::size_of::<Node>(), 112);
+    }
+
+    /// Item counts grow live with every batch, at the parent and at every ancestor.
+    #[test]
+    fn item_counts_grow_with_batches() {
+        let mut t = Tree::new("/r".into(), 100, 100, 1, 1);
+        assert_eq!(t.nodes[t.root].items, 0);
+        t.apply(Batch {
+            parent_id: 0,
+            nodes: vec![dir("a", 1), file("b", 10)],
+            error: None,
+        });
+        assert_eq!(t.nodes[t.root].items, 2);
+        assert_eq!(items(&t, "a"), 0, "not read yet");
+        t.apply(Batch {
+            parent_id: 1,
+            nodes: vec![file("x", 11), dir("sub", 2)],
+            error: None,
+        });
+        assert_eq!(items(&t, "a"), 2);
+        assert_eq!(t.nodes[t.root].items, 4);
+        t.apply(Batch {
+            parent_id: 2,
+            nodes: vec![file("y", 12)],
+            error: None,
+        });
+        assert_eq!(items(&t, "sub"), 1);
+        assert_eq!(items(&t, "a"), 3);
+        assert_eq!(t.nodes[t.root].items, 5);
+        assert_eq!(items(&t, "b"), 0, "files have no items");
+        for i in 0..t.nodes.len() {
+            assert_eq!(
+                t.nodes[i].items,
+                entries_below(&t, i),
+                "{}",
+                t.nodes[i].name
+            );
+        }
+    }
+
+    /// A batch that arrives before its parent counts once it is grafted, not before.
+    #[test]
+    fn item_counts_include_orphans_once_flushed() {
+        let mut t = Tree::new("/r".into(), 100, 100, 1, 1);
+        t.apply(Batch {
+            parent_id: 1,
+            nodes: vec![file("x", 11), file("y", 12)],
+            error: None,
+        });
+        assert_eq!(t.nodes[t.root].items, 0, "orphan not grafted yet");
+        t.apply(Batch {
+            parent_id: 0,
+            nodes: vec![dir("a", 1)],
+            error: None,
+        });
+        assert!(t.orphans_is_empty());
+        assert_eq!(items(&t, "a"), 2);
+        assert_eq!(t.nodes[t.root].items, 3);
+    }
+
+    /// Hard-link duplicates and excluded entries don't count toward sizes, but they are
+    /// listed entries, so they count as items. An excluded directory contributes just itself.
+    #[test]
+    fn shared_and_excluded_entries_are_items() {
+        let mut t = Tree::new("/r".into(), 100, 100, 1, 1);
+        let shared = NewNode {
+            shared: true,
+            hlink: true,
+            ..file("dup", 10)
+        };
+        let excluded_dir = NewNode {
+            excluded: Excluded::Pattern,
+            dir_id: None,
+            ..dir("node_modules", 2)
+        };
+        let excluded_file = NewNode {
+            excluded: Excluded::Age,
+            ..file("old", 11)
+        };
+        t.apply(Batch {
+            parent_id: 0,
+            nodes: vec![shared, excluded_dir, excluded_file, file("f", 12)],
+            error: None,
+        });
+        assert_eq!(t.nodes[t.root].items, 4);
+        assert_eq!(items(&t, "node_modules"), 0);
+        assert_eq!(
+            t.nodes[t.root].apparent,
+            100 + 100,
+            "only `f` counts toward the size"
+        );
+
+        // The same rules apply to imported entries.
+        let mut t = Tree::new_imported("/r".into(), 0, 0, 1, 1);
+        let d = t.import_child(
+            t.root,
+            "d".into(),
+            NodeKind::Dir,
+            10,
+            10,
+            1,
+            2,
+            false,
+            false,
+            Excluded::No,
+            false,
+        );
+        for (name, shared, excluded) in [
+            ("a", false, Excluded::No),
+            ("dup", true, Excluded::No),
+            ("ex", false, Excluded::OtherFs),
+        ] {
+            t.import_child(
+                d,
+                name.into(),
+                NodeKind::File,
+                10,
+                10,
+                1,
+                3,
+                shared,
+                shared,
+                excluded,
+                false,
+            );
+        }
+        assert_eq!(t.nodes[d].items, 3);
+        assert_eq!(t.nodes[t.root].items, 4);
+        assert_eq!(
+            t.nodes[t.root].apparent, 20,
+            "d and a count; dup and ex don't"
+        );
+    }
+
+    /// Deleting an entry removes it and everything below it from every ancestor's count.
+    #[test]
+    fn delete_subtracts_items() {
+        let mut t = small_tree();
+        assert_eq!(t.nodes[t.root].items, 5);
+        t.delete_subtree(idx_of(&t, "sub"));
+        assert_eq!(items(&t, "a"), 1, "x is left");
+        assert_eq!(t.nodes[t.root].items, 3);
+        t.delete_subtree(idx_of(&t, "b"));
+        assert_eq!(t.nodes[t.root].items, 2);
+        t.delete_subtree(idx_of(&t, "a"));
+        assert_eq!(t.nodes[t.root].items, 0);
+    }
+
+    /// A rescan resets the subtree's count; the new batches bring it back, live.
+    #[test]
+    fn refresh_resets_and_restores_items() {
+        let mut t = small_tree();
+        let a = idx_of(&t, "a");
+        let base = 1 << 40;
+        t.begin_refresh(a, base);
+        assert_eq!(t.nodes[a].items, 0);
+        assert_eq!(t.nodes[t.root].items, 2, "a and b stay");
+
+        t.apply(Batch {
+            parent_id: base,
+            nodes: vec![file("x", 11), dir("sub", base + 1), file("new", 13)],
+            error: None,
+        });
+        assert_eq!(t.nodes[a].items, 3);
+        assert_eq!(t.nodes[t.root].items, 5);
+        t.apply(Batch {
+            parent_id: base + 1,
+            nodes: vec![file("y", 12)],
+            error: None,
+        });
+        assert_eq!(t.nodes[a].items, 4);
+        assert_eq!(t.nodes[t.root].items, 6);
+        assert_eq!(t.nodes[t.root].items, entries_below(&t, t.root));
+    }
+
+    /// Counts saturate instead of wrapping.
+    #[test]
+    fn item_counts_saturate() {
+        let mut t = small_tree();
+        let a = idx_of(&t, "a");
+        t.nodes[a].items = u32::MAX - 1;
+        t.nodes[t.root].items = u32::MAX - 1;
+        t.apply(Batch {
+            parent_id: 2,
+            nodes: vec![file("p", 20), file("q", 21)],
+            error: None,
+        });
+        assert_eq!(t.nodes[a].items, u32::MAX);
+        assert_eq!(t.nodes[t.root].items, u32::MAX);
     }
 }
