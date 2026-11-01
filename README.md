@@ -220,6 +220,9 @@ results (`remove_dir_all` can't be cleanly cancelled). Any other key disarms the
 `-o` writes the ncdu export format (`[1, 2, {meta}, <root>]`, per-item `asize`/`dsize`, `hlnkc`,
 `notreg`, `excluded`, `read_error`), readable by ncdu and other tools. `-f` reads the same format
 (including dumps produced by ncdu itself), re-deriving hard-link dedup so totals match a live scan.
+Because delete, open and the shell act on the paths an imported tree names, `-f` refuses a dump
+whose entry names aren't single path components (empty, `.`, `..`, or containing `/` or NUL), or
+whose root path contains a `..` component.
 Press `e` in the UI to write the currently browsed tree — including deletions made this session —
 to `rcdu-dump.json` in the working directory (`rcdu-dump-2.json` and so on if one already
 exists), in the same format as `-o`: handy for snapshotting a long scan without redoing it.

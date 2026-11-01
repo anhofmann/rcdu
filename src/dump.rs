@@ -116,6 +116,7 @@ pub fn import<R: Read>(r: R) -> io::Result<Tree> {
     let info = arr.first().ok_or_else(|| bad("empty root directory"))?;
 
     let item = parse_item(info);
+    check_root_name(&item.name)?;
     let mut tree = Tree::new_imported(
         item.name.into(),
         item.apparent,
@@ -128,7 +129,7 @@ pub fn import<R: Read>(r: R) -> io::Result<Tree> {
     // Dedup hard links during import too, so totals match a live scan.
     let mut seen: HashSet<(u64, u64)> = HashSet::new();
     for child in &arr[1..] {
-        add_value(&mut tree, root, child, &mut seen);
+        add_value(&mut tree, root, child, &mut seen)?;
     }
     Ok(tree)
 }
@@ -165,11 +166,19 @@ fn parse_item(v: &Value) -> Item {
     }
 }
 
-fn add_value(tree: &mut Tree, parent: NodeIdx, v: &Value, seen: &mut HashSet<(u64, u64)>) {
+fn add_value(
+    tree: &mut Tree,
+    parent: NodeIdx,
+    v: &Value,
+    seen: &mut HashSet<(u64, u64)>,
+) -> io::Result<()> {
     if let Some(arr) = v.as_array() {
         // Directory: [info, children...].
-        let Some(info) = arr.first() else { return };
+        let Some(info) = arr.first() else {
+            return Ok(());
+        };
         let item = parse_item(info);
+        check_name(&item.name)?;
         let idx = tree.import_child(
             parent,
             item.name.into(),
@@ -184,10 +193,11 @@ fn add_value(tree: &mut Tree, parent: NodeIdx, v: &Value, seen: &mut HashSet<(u6
             item.read_error,
         );
         for child in &arr[1..] {
-            add_value(tree, idx, child, seen);
+            add_value(tree, idx, child, seen)?;
         }
     } else {
         let item = parse_item(v);
+        check_name(&item.name)?;
         let kind = if item.notreg {
             NodeKind::Other
         } else {
@@ -209,6 +219,26 @@ fn add_value(tree: &mut Tree, parent: NodeIdx, v: &Value, seen: &mut HashSet<(u6
             item.read_error,
         );
     }
+    Ok(())
+}
+
+/// Names become real paths (`Tree::path_of`) that delete, open and the shell act on, so a
+/// crafted dump must not be able to make an entry resolve anywhere but where it is shown. A
+/// child name is exactly one path component: non-empty, not `.` or `..`, no `/`, no NUL.
+fn check_name(name: &str) -> io::Result<()> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+        return Err(bad(&format!("invalid entry name {name:?}")));
+    }
+    Ok(())
+}
+
+/// The root name is a whole path, but it still may not be empty, contain a NUL, or climb out
+/// with a `..` component.
+fn check_root_name(name: &str) -> io::Result<()> {
+    if name.is_empty() || name.contains('\0') || name.split('/').any(|c| c == "..") {
+        return Err(bad(&format!("invalid root name {name:?}")));
+    }
+    Ok(())
 }
 
 fn bad(msg: &str) -> io::Error {
@@ -296,5 +326,49 @@ mod tests {
         assert_eq!(t.nodes[find("e")].items, 0);
         assert_eq!(t.nodes[find("node_modules")].items, 0);
         assert_eq!(t.nodes[t.root].items, 6, "d (+3), node_modules, g");
+    }
+
+    /// Entry names are joined into real paths for delete/open/shell, so a dump must not be
+    /// able to smuggle in `..`, separators or other names that resolve somewhere else
+    /// (issue #1). Such dumps are rejected outright instead of being silently renamed.
+    #[test]
+    fn import_rejects_path_traversal_names() {
+        let wrap = |child: &str| format!(r#"[1,2,{{}},[{{"name":"/r"}},{child}]]"#);
+        for child in [
+            r#"{"name":".."}"#,
+            r#"{"name":"."}"#,
+            r#"{"name":""}"#,
+            r#"{"name":"a/b"}"#,
+            r#"{"name":"/etc"}"#,
+            r#"{"name":"a\u0000b"}"#,
+            r#"[{"name":".."},{"name":"important","asize":1}]"#,
+            r#"[{"name":"d"},[{"name":".."},{"name":"important"}]]"#,
+        ] {
+            let err = import(wrap(child).as_bytes()).err();
+            assert_eq!(
+                err.map(|e| e.kind()),
+                Some(io::ErrorKind::InvalidData),
+                "{child} must be rejected"
+            );
+        }
+        // The root is a path, but still not one that climbs out or carries a NUL.
+        for root in ["", "..", "/home/u/tmp/../..", "/r\\u0000x"] {
+            let json = format!(r#"[1,2,{{}},[{{"name":"{root}"}}]]"#);
+            assert!(
+                import(json.as_bytes()).is_err(),
+                "root {root:?} must be rejected"
+            );
+        }
+    }
+
+    /// Names that merely look unusual are ordinary file names and still import.
+    #[test]
+    fn import_accepts_unusual_but_safe_names() {
+        let json = r#"[1,2,{},[{"name":"/r"},
+            {"name":"..."},{"name":"..hidden"},{"name":"a b"},{"name":"back\\slash"},
+            [{"name":".git"},{"name":"x."}]]]"#;
+        let t = import(json.as_bytes()).unwrap();
+        assert_eq!(t.nodes[t.root].items, 6);
+        assert_eq!(t.path_of(t.nodes.len() - 1), "/r/.git/x.");
     }
 }
