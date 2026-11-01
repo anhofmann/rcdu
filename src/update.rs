@@ -8,7 +8,9 @@ use std::process::Command;
 
 use crate::sha256;
 
-const REPO: &str = "mayankasthana/rcdu";
+/// The repository this build's releases are published from. `install.sh` and the README's
+/// install instructions must name the same one (see `install_paths_name_the_release_repo`).
+const REPO: &str = "anhofmann/rcdu";
 
 /// Asset name for the platform rcdu was built for, as published on Releases.
 fn asset_name() -> Option<&'static str> {
@@ -203,6 +205,36 @@ mod tests {
             expected_digest(sums, "rcdu-portable-macos-aarch64").as_deref(),
             Some("ba7816bf")
         );
+    }
+
+    /// `rcdu update`, `install.sh` and the README must all fetch binaries from the repository
+    /// that publishes this build's releases, never from another account (issue #2).
+    #[test]
+    fn install_paths_name_the_release_repo() {
+        let install = include_str!("../install.sh");
+        assert!(
+            install.contains(&format!("REPO=\"{REPO}\"")),
+            "install.sh REPO="
+        );
+        for (file, text) in [
+            ("install.sh", install),
+            ("README.md", include_str!("../README.md")),
+        ] {
+            for host in ["github.com/", "githubusercontent.com/"] {
+                for (at, _) in text.match_indices(host) {
+                    let rest = &text[at + host.len()..];
+                    if rest.starts_with('$') {
+                        continue; // install.sh's own `$REPO` expansion
+                    }
+                    let path: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || "-_./".contains(*c))
+                        .collect();
+                    let repo = path.split('/').take(2).collect::<Vec<_>>().join("/");
+                    assert_eq!(repo, REPO, "{file} links {host}{path}");
+                }
+            }
+        }
     }
 
     #[test]
