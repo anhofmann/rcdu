@@ -407,7 +407,7 @@ fn age_excluded(mtime: i64, shared: &Shared) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Tree;
+    use crate::model::{NodeIdx, Tree};
     use std::fs;
 
     fn opts(threads: usize, root_dev: u64) -> Opts {
@@ -763,6 +763,102 @@ mod tests {
         );
         assert_eq!(tree.total_files, fresh.total_files);
         assert_eq!(tree.total_dirs, fresh.total_dirs);
+        assert_eq!(
+            tree.nodes[target].items, 4,
+            "f1, inner, inner/f2, inner/new"
+        );
+        assert_eq!(
+            tree.nodes[tree.root].items, fresh.nodes[fresh.root].items,
+            "root item count matches a fresh scan"
+        );
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Entries below `dir` on disk, without following symlinks: `find DIR -mindepth 1 | wc -l`.
+    fn entries_on_disk(dir: &Path) -> u32 {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                let below = if e.file_type().unwrap().is_dir() {
+                    entries_on_disk(&e.path())
+                } else {
+                    0
+                };
+                1 + below
+            })
+            .sum()
+    }
+
+    /// Item counts after a real scan: every directory reports the number of entries below it,
+    /// matching `find DIR -mindepth 1 | wc -l`. Hard-link duplicates and symlinks count; an
+    /// excluded directory counts as one entry and its contents not at all. The count stays
+    /// consistent with the global totals after every batch, not just at the end.
+    #[test]
+    fn item_counts_match_entries_on_disk() {
+        let base = std::env::temp_dir().join(format!("rcdu_items_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("a/b/c")).unwrap();
+        fs::create_dir_all(base.join("d")).unwrap();
+        fs::create_dir_all(base.join("skip/x")).unwrap();
+        fs::write(base.join("a/f1"), b"x").unwrap();
+        fs::write(base.join("a/b/f2"), b"x").unwrap();
+        fs::hard_link(base.join("a/f1"), base.join("d/hl")).unwrap();
+        std::os::unix::fs::symlink("../a/f1", base.join("d/ln")).unwrap();
+        fs::write(base.join("skip/x/y"), b"x").unwrap();
+        fs::write(base.join("top"), b"x").unwrap();
+
+        let meta = fs::symlink_metadata(&base).unwrap();
+        let mut tree = Tree::new(
+            "root".into(),
+            meta.len(),
+            meta.blocks() * 512,
+            meta.dev(),
+            meta.ino(),
+        );
+        let mut o = opts(4, meta.dev());
+        o.excludes = vec!["skip".to_string()];
+        for batch in start(base.clone(), o).events.iter() {
+            tree.apply(batch);
+            let root = &tree.nodes[tree.root];
+            assert_eq!(
+                root.items as u64,
+                tree.total_dirs + tree.total_files - 1,
+                "live count"
+            );
+        }
+
+        let child = |parent: NodeIdx, name: &str| {
+            tree.nodes[parent]
+                .children
+                .iter()
+                .copied()
+                .find(|&c| tree.nodes[c].name == name)
+                .unwrap_or_else(|| panic!("{name} present"))
+        };
+        let a = child(tree.root, "a");
+        let b = child(a, "b");
+        let c = child(b, "c");
+        let d = child(tree.root, "d");
+        let skip = child(tree.root, "skip");
+        for (idx, path) in [(a, "a"), (b, "a/b"), (c, "a/b/c"), (d, "d")] {
+            assert_eq!(
+                tree.nodes[idx].items,
+                entries_on_disk(&base.join(path)),
+                "{path}"
+            );
+        }
+        assert_eq!(tree.nodes[a].items, 4, "f1, b, b/f2, b/c");
+        assert_eq!(tree.nodes[d].items, 2, "hard link and symlink");
+        assert!(
+            tree.nodes.iter().any(|n| n.shared),
+            "one link is a duplicate"
+        );
+        assert_eq!(tree.nodes[skip].items, 0, "excluded: not descended into");
+        // Everything on disk, minus what the excluded directory hides (x and x/y).
+        assert_eq!(tree.nodes[tree.root].items, entries_on_disk(&base) - 2);
+        assert_eq!(tree.nodes[tree.root].items, 10);
 
         fs::remove_dir_all(&base).unwrap();
     }

@@ -697,6 +697,10 @@ impl App {
         ];
         if n.is_dir() {
             rows.push(("entries".to_string(), n.children.len().to_string()));
+            // An excluded directory was never read, so it has no meaningful count.
+            if n.excluded == Excluded::No {
+                rows.push(("total items".to_string(), n.items.to_string()));
+            }
         }
         if n.hlink {
             rows.push(("hard links".to_string(), "yes".to_string()));
@@ -1845,6 +1849,39 @@ mod tests {
             Excluded::No,
             false,
         )
+    }
+
+    /// The info popup shows a directory's direct entries and its recursive item count; an
+    /// excluded directory (never read) gets no item count.
+    #[test]
+    fn info_rows_show_recursive_item_count_for_dirs() {
+        let mut app = app_for_find();
+        let row = |app: &App, idx, key: &str| {
+            app.info_pairs(idx)
+                .into_iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v)
+        };
+        let docs = idx_named(&app, "docs");
+        assert_eq!(row(&app, docs, "entries").as_deref(), Some("2"));
+        assert_eq!(row(&app, docs, "total items").as_deref(), Some("3"));
+        let file = idx_named(&app, "readme");
+        assert_eq!(row(&app, file, "total items"), None, "files have none");
+
+        let ex = app.tree.import_child(
+            app.tree.root,
+            "node_modules".into(),
+            NodeKind::Dir,
+            0,
+            0,
+            1,
+            9,
+            false,
+            false,
+            Excluded::Pattern,
+            false,
+        );
+        assert_eq!(row(&app, ex, "total items"), None, "excluded: never read");
     }
 
     /// /r: docs/ { readme.md (50), sub/ { README.txt (200) } }, readme (10), other.bin (1000).
