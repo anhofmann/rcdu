@@ -496,9 +496,14 @@ impl App {
     /// status line.
     fn request_export(&mut self) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let path = next_export_path(&cwd);
-        match self.export_tree_to(&path) {
-            Ok(()) => {
+        self.export_into(&cwd);
+    }
+
+    fn export_into(&mut self, dir: &Path) {
+        let written = create_export_file(dir)
+            .and_then(|(path, file)| self.export_tree_to(file).map(|()| path));
+        match written {
+            Ok(path) => {
                 let entries = self.tree.total_dirs + self.tree.total_files;
                 self.status = Some(format!("exported {entries} entries to {}", path.display()));
             }
@@ -507,8 +512,8 @@ impl App {
     }
 
     /// Write the tree as ncdu-compatible JSON (the `-o` format, via `dump::export`).
-    fn export_tree_to(&self, path: &Path) -> std::io::Result<()> {
-        let mut w = BufWriter::new(std::fs::File::create(path)?);
+    fn export_tree_to(&self, file: std::fs::File) -> std::io::Result<()> {
+        let mut w = BufWriter::new(file);
         crate::dump::export(&self.tree, &mut w)?;
         w.flush()
     }
@@ -1306,16 +1311,27 @@ pub enum KeyAction {
     FindBackspace,
 }
 
-/// First free `rcdu-dump*.json` path in `dir`, so consecutive exports never clobber each
-/// other (or an unrelated file that happens to share the name).
-fn next_export_path(dir: &Path) -> PathBuf {
-    if !dir.join("rcdu-dump.json").exists() {
-        return dir.join("rcdu-dump.json");
+/// Create the first free `rcdu-dump*.json` in `dir`, so consecutive exports never clobber each
+/// other (or an unrelated file that happens to share the name). `create_new` (`O_EXCL`) makes
+/// the check and the create one atomic step that fails on anything already at the name,
+/// including a planted symlink, so the write can never be redirected elsewhere.
+fn create_export_file(dir: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    for n in 1u32.. {
+        let path = match n {
+            1 => dir.join("rcdu-dump.json"),
+            n => dir.join(format!("rcdu-dump-{n}.json")),
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    (2..)
-        .map(|n| dir.join(format!("rcdu-dump-{n}.json")))
-        .find(|p| !p.exists())
-        .expect("a free path always exists")
+    Err(std::io::Error::other("no free rcdu-dump*.json name"))
 }
 
 /// Split Unix seconds into UTC civil date/time (Howard Hinnant's civil-from-days).
@@ -1742,7 +1758,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("dump.json");
-        app.export_tree_to(&path).unwrap();
+        app.export_tree_to(std::fs::File::create(&path).unwrap())
+            .unwrap();
         let re = crate::dump::import(std::io::BufReader::new(std::fs::File::open(&path).unwrap()))
             .unwrap();
         assert_eq!(
@@ -1759,20 +1776,53 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rcdu_export_name_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let name = |dir: &Path| {
+            create_export_file(dir)
+                .unwrap()
+                .0
+                .file_name()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(name(&dir), "rcdu-dump.json");
+        assert_eq!(name(&dir), "rcdu-dump-2.json");
+        std::fs::write(dir.join("rcdu-dump-4.json"), b"x").unwrap();
+        assert_eq!(name(&dir), "rcdu-dump-3.json");
+        assert_eq!(name(&dir), "rcdu-dump-5.json");
         assert_eq!(
-            next_export_path(&dir).file_name().unwrap(),
-            "rcdu-dump.json"
+            std::fs::read(dir.join("rcdu-dump-4.json")).unwrap(),
+            b"x",
+            "an existing file is never truncated"
         );
-        std::fs::write(dir.join("rcdu-dump.json"), b"x").unwrap();
-        assert_eq!(
-            next_export_path(&dir).file_name().unwrap(),
-            "rcdu-dump-2.json"
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A symlink planted at the export name (even a dangling one, which `exists()` reports as
+    /// absent) must not redirect the write: the export skips the name instead (issue #3).
+    #[test]
+    fn export_never_writes_through_a_symlink() {
+        let dir = std::env::temp_dir().join(format!("rcdu_export_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::os::unix::fs::symlink(&victim, dir.join("rcdu-dump.json")).unwrap();
+
+        let mut app = app_with_entries();
+        app.export_into(&dir);
+
+        assert!(!victim.exists(), "the symlink target must not be created");
+        let link = std::fs::symlink_metadata(dir.join("rcdu-dump.json")).unwrap();
+        assert!(
+            link.file_type().is_symlink(),
+            "the planted link is left alone"
         );
-        std::fs::write(dir.join("rcdu-dump-2.json"), b"x").unwrap();
-        assert_eq!(
-            next_export_path(&dir).file_name().unwrap(),
-            "rcdu-dump-3.json"
+        let out = dir.join("rcdu-dump-2.json");
+        assert!(
+            app.status.as_deref().unwrap().ends_with("rcdu-dump-2.json"),
+            "{:?}",
+            app.status
         );
+        assert!(crate::dump::import(std::fs::File::open(&out).unwrap()).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
